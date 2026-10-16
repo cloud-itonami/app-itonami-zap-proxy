@@ -1,7 +1,22 @@
 #!/usr/bin/env node
 // zap-proxy Node transport: emits EDN the decision core consumes.
-// Usage: node zap_fetch.js <url>   ->  {:status 200 :headers {:set-cookie ["a" "b"]} :body "..."}
-const u = process.argv[2] || "http://127.0.0.1";
+// Usage: node zap_fetch.js <url> <approval-id> <passive|active>
+// The helper independently checks the owner-managed ledger before opening a
+// socket, so direct invocation cannot bypass the host tool's preflight gate.
+const cp = require("child_process");
+const path = require("path");
+const u = process.argv[2] || "";
+const approvalId = process.argv[3] || "";
+const mode = process.argv[4] || "";
+const auth = cp.spawnSync(
+  "python3",
+  [path.join(__dirname, "authorization.py"), "--check", approvalId, u, mode, "1"],
+  { encoding: "utf8" },
+);
+if (auth.status !== 0) {
+  process.stdout.write('{:status 0 :headers {} :body "refused: approval required"}');
+  process.exit(3);
+}
 const esc = (s) =>
   '"' +
   String(s)

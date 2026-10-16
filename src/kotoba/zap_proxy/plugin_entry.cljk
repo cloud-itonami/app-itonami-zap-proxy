@@ -2,56 +2,70 @@
   "Host-side entry for the hermes-zap-proxy plugin.
 
   Reads one EDN request map on stdin:
-    {:target \"http://host:port\" :active? bool :max-pages N :transport :java-http}
+    {:target \"https://host/app\" :approval-id \"id\" :active? bool :max-pages N}
 
   Prints the report document (EDN) on stdout. The transport effect lives here
-  (java.net.http), keeping the decision core pure. This namespace is the only
-  one in zap-proxy that touches the network."
+  (java.net.http); the approval record and path scope are checked before each
+  request, and redirects are not followed."
   (:require [kotoba.lang.edn :as edn]
             [kotoba.zap-proxy.spider :as spider]
             [kotoba.zap-proxy.passive :as passive]
             [kotoba.zap-proxy.active :as active]
+            [kotoba.zap-proxy.authorization :as authorization]
             [kotoba.zap-proxy.report :as report])
   (:import (java.net URI)
            (java.net.http HttpClient HttpClient$Redirect HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers)))
 
-(defn java-fetch-fn
+(defn- java-fetch-fn
   "IHttp-equivalent transport over java.net.http. Returns the response map
-  shape the decision core consumes. Redirects follow up to normal policy;
-  per-request timeout 15s."
-  [{:keys [method url headers body]}]
-  (let [client (-> (HttpClient/newBuilder)
-                   (.connectTimeout (java.time.Duration/ofSeconds 15))
-                   (.followRedirects HttpClient$Redirect/NORMAL)
-                   (.build))
-        builder (-> (HttpRequest/newBuilder (URI/create url))
-                    (.timeout (java.time.Duration/ofSeconds 15))
-                    (.GET))]
-    (doseq [[k v] headers]
-      (.header builder k (str v)))
-    (when (and body (not= method "GET"))
-      (.method builder (or method "POST")
-               (HttpRequest$BodyPublishers/ofString (str body))))
-    (let [resp (.send client (.build builder)
-                      (HttpResponse$BodyHandlers/ofString))]
-      {:status (.statusCode resp)
-       :headers (into {} (.map (.headers resp)))
-       :body (.body resp)})))
+  shape the decision core consumes. Every request is checked against the
+  approval scope; redirects are returned, never followed."
+  [approval-id mode max-pages initial-scope]
+  (fn [{:keys [method url headers body]}]
+    (when-not (or (nil? method) (= "GET" method))
+      (throw (ex-info "Requested method is outside the approved scope." {:refused true})))
+    (authorization/require-url! initial-scope url)
+    (let [scope (authorization/authorization-scope approval-id url mode max-pages)
+          _ (authorization/require-url! scope url)
+          client (-> (HttpClient/newBuilder)
+                     (.connectTimeout (java.time.Duration/ofSeconds 15))
+                     (.followRedirects HttpClient$Redirect/NEVER)
+                     (.build))
+          builder (-> (HttpRequest/newBuilder (URI/create url))
+                      (.timeout (java.time.Duration/ofSeconds 15))
+                      (.GET))]
+      (doseq [[k v] headers]
+        (.header builder k (str v)))
+      (when (and body (not= method "GET"))
+        (.method builder (or method "POST")
+                 (HttpRequest$BodyPublishers/ofString (str body))))
+      (let [resp (.send client (.build builder)
+                        (HttpResponse$BodyHandlers/ofString))]
+        {:status (.statusCode resp)
+         :headers (into {} (.map (.headers resp)))
+         :body (.body resp)}))))
 
 (defn -main [& _]
-  (let [req (edn/read-string (java.lang.String. (.readAllBytes System/in)))
-        {:keys [target active? max-pages]} req
-        fetch-fn java-fetch-fn
+  (let [req (authorization/validate-production-request!
+             (edn/read-string (java.lang.String. (.readAllBytes System/in))))
+        {:keys [target active? max-pages approval-id]} req
+        mode (if active? "active" "passive")
+        scope (authorization/authorization-scope approval-id target mode (or max-pages 50))
+        fetch-fn (java-fetch-fn approval-id mode (or max-pages 50) scope)
         {:keys [pages]} (spider/spider {:seed-url target
                                         :fetch-fn fetch-fn
-                                        :max-pages (or max-pages 50)})
+                                        :max-pages (or max-pages 50)
+                                        :approval-id approval-id
+                                        :mode mode})
         passive-findings (vec (mapcat (fn [resp]
                                         (passive/passive-scan {:url (:url resp)} resp))
                                       pages))
         active-findings (if active?
                           (vec (mapcat (fn [resp]
                                          (active/active-scan {:url (:url resp)
-                                                              :send-fn fetch-fn}))
+                                                              :send-fn fetch-fn
+                                                              :approval-id approval-id
+                                                              :max-pages (or max-pages 50)}))
                                        pages))
                           [])
         findings (vec (concat passive-findings active-findings))

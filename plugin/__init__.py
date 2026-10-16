@@ -3,7 +3,7 @@
 Exposes the kotoba-lang/zap-proxy DAST decision core as agent tools:
 zap_scan (passive), zap_scan_active (intrusive, gated), zap_scan_rules.
 
-The own-host gate lives in tools.py and runs before any subprocess. Plugin
+The human-reviewed approval gate lives in tools.py and runs before any subprocess. Plugin
 kind is standalone: opt-in via plugins.enabled in config.yaml.
 """
 from __future__ import annotations

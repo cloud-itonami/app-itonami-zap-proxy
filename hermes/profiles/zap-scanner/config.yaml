@@ -104,6 +104,8 @@ plugins:
   entries:
     hermes-zap-proxy:
       settings:
+        # Legacy inventory only. The scanner does not treat this list or
+        # allow_active as permission; it requires a reviewed approval ledger.
         zap_proxy_targets:
           - url: http://127.0.0.1:8765
             allow_active: false

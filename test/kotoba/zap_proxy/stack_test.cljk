@@ -1,5 +1,5 @@
 (ns kotoba.zap-proxy.stack-test
-  "Spider + passive + active + cli over an injected mock transport.
+  "Spider + passive + active over an injected mock transport.
   No socket is opened anywhere in this suite — the effect is a map lookup,
   which is the whole point of the seam."
   (:require [kotoba.lang.edn :as edn]
@@ -8,8 +8,9 @@
             [kotoba.zap-proxy.spider :as spider]
             [kotoba.zap-proxy.passive :as passive]
             [kotoba.zap-proxy.active :as active]
-            [kotoba.zap-proxy.cli :as cli]
-            [kotoba.zap-proxy.report :as report]))
+            [kotoba.zap-proxy.test-support :as test-support]
+            [kotoba.zap-proxy.report :as report]
+            [kotoba.zap-proxy.authorization :as authorization]))
 
 (def ^:private site
   {"http://t.local/" {:status 200 :headers {"content-type" "text/html"} :body
@@ -40,15 +41,45 @@
 (def ^:private fetch-fn
   (fn [req] (get site (:url req) {:status 404 :headers {} :body "not found"})))
 
+(def ^:private mock-approval-scope
+  {:ok true :mode "passive" :max-pages 50
+   :assets [{:origin "http://t.local:80" :path "/"}]})
+
 (deftest spider-test
-  (let [{:keys [pages visited queue-drained?]} (spider/spider {:seed-url "http://t.local/" :fetch-fn fetch-fn})]
-    (is (contains? visited "http://t.local/"))
-    (is (contains? visited "http://t.local/a"))
-    (is (contains? visited "http://t.local/x?uid=1"))
-    (is (= 3 (count pages)))
-    (is (true? queue-drained?))
-    ;; out-of-origin link never fetched
-    (is (not (some #(re-find #"other.example" %) visited)))))
+  (with-redefs [authorization/authorization-scope
+                (fn [_ _ mode _] (assoc mock-approval-scope :mode mode))]
+    (let [{:keys [pages visited queue-drained?]}
+          (spider/spider {:seed-url "http://t.local/" :fetch-fn fetch-fn
+                          :approval-id "test-approval" :mode "passive"})]
+      (is (contains? visited "http://t.local/"))
+      (is (contains? visited "http://t.local/a"))
+      (is (contains? visited "http://t.local/x?uid=1"))
+      (is (= 3 (count pages)))
+      (is (true? queue-drained?))
+      ;; out-of-origin link never fetched
+      (is (not (some #(re-find #"other.example" %) visited))))))
+
+(deftest spider-never-fetches-out-of-scope-path-test
+  (let [fetches (atom [])
+        scoped {:ok true :mode "passive" :max-pages 10
+                :assets [{:origin "http://t.local:80" :path "/app"}]}
+        result (with-redefs [authorization/authorization-scope
+                             (fn [_ _ mode _] (assoc scoped :mode mode))]
+                 (try
+                   (spider/spider
+                    {:seed-url "http://t.local/app"
+                     :approval-id "test-approval"
+                     :mode "passive"
+                     :max-pages 10
+                     :fetch-fn (fn [{:keys [url]}]
+                                 (swap! fetches conj url)
+                                 {:status 200 :headers {}
+                                  :body "<a href=\"/private\">private</a>"})})
+                   :completed
+                   (catch #?(:cljs :default :clj Throwable) error
+                     {:refused (:refused (ex-data error))})))]
+    (is (= {:refused true} result))
+    (is (= ["http://t.local/app"] @fetches))))
 
 (deftest passive-test
   (testing "cookie flags"
@@ -70,35 +101,59 @@
       (is (= :high (:severity (first findings)))))))
 
 (deftest active-test
-  (testing "SQLi error reflection detected"
-    (let [findings (active/active-scan
-                    {:url "http://t.local/x?uid=1"
-                     :send-fn (fn [{:keys [url]}]
-                                (if (re-find #"'|OR 1=1" url)
-                                  {:status 200 :headers {} :body "SQLSTATE error near input"}
-                                  {:status 200 :headers {} :body "welcome"}))})]
-      (is (some #(= "40018" (:rule-id %)) findings))
-      (is (some #(= "uid" (:param %)) findings))))
-  (testing "benign app: no findings"
-    (let [findings (active/active-scan
-                    {:url "http://t.local/x?uid=1"
-                     :send-fn (fn [_] {:status 200 :headers {} :body "welcome"})})]
-      (is (empty? findings)))))
+  (with-redefs [authorization/authorization-scope
+                (fn [_ _ mode _] (assoc mock-approval-scope :mode mode))]
+    (testing "SQLi error reflection detected"
+      (let [findings (active/active-scan
+                      {:url "http://t.local/x?uid=1"
+                       :approval-id "test-approval"
+                       :send-fn (fn [{:keys [url]}]
+                                  (if (re-find #"'|OR 1=1" url)
+                                    {:status 200 :headers {} :body "SQLSTATE error near input"}
+                                    {:status 200 :headers {} :body "welcome"}))})]
+        (is (some #(= "40018" (:rule-id %)) findings))
+        (is (some #(= "uid" (:param %)) findings))))
+    (testing "benign app: no findings"
+      (let [findings (active/active-scan
+                      {:url "http://t.local/x?uid=1" :approval-id "test-approval"
+                       :send-fn (fn [_] {:status 200 :headers {} :body "welcome"})})]
+        (is (empty? findings))))))
 
 (deftest cli-pipeline-test
-  (let [doc (cli/scan {:target "http://t.local/" :fetch-fn fetch-fn :active? false})]
-    (is (= "http://t.local/" (:report/target doc)))
-    (is (pos? (:report/total doc)))
-    (is (map? (:report/counts doc)))
-    (is (vector? (:report/findings doc)))))
+  (with-redefs [authorization/authorization-scope
+                (fn [_ _ mode _] (assoc mock-approval-scope :mode mode))]
+    (let [doc (test-support/scan {:target "http://t.local/" :approval-id "test-approval"
+                         :fetch-fn fetch-fn :active? false})]
+      (is (= "http://t.local/" (:report/target doc)))
+      (is (pos? (:report/total doc)))
+      (is (map? (:report/counts doc)))
+      (is (vector? (:report/findings doc))))))
+
+(deftest cli-refuses-without-an-approval-before-transport-test
+  (let [transport-called? (atom false)
+        result (try
+                 (test-support/scan {:target "http://127.0.0.1:9/"
+                            :approval-id "test-missing-approval-9f4a8f"
+                            :fetch-fn (fn [_]
+                                        (reset! transport-called? true)
+                                        {:status 200 :headers {} :body ""})
+                            :active? false})
+                 :completed
+                 (catch #?(:cljs :default :clj Throwable) error
+                   {:refused true}))]
+    (is (= {:refused true} result))
+    (is (false? @transport-called?))))
 
 (deftest report-test
-  (let [doc (cli/scan {:target "http://t.local/" :fetch-fn fetch-fn :active? false})
-        json (report/report-json {:target "http://t.local/" :findings (:report/findings doc)})]
-    (is (re-find #"\"total\":\d+" json))
-    (is (re-find #"\"rule_id\":\"10010\"" json))
-    (is (re-find #"\"rule_id\":\"10038\"" json))
-    (is (re-find #"\"rule_id\":\"10027\"" json))))
+  (with-redefs [authorization/authorization-scope
+                (fn [_ _ mode _] (assoc mock-approval-scope :mode mode))]
+    (let [doc (test-support/scan {:target "http://t.local/" :approval-id "test-approval"
+                         :fetch-fn fetch-fn :active? false})
+          json (report/report-json {:target "http://t.local/" :findings (:report/findings doc)})]
+      (is (re-find #"\"total\":\d+" json))
+      (is (re-find #"\"rule_id\":\"10010\"" json))
+      (is (re-find #"\"rule_id\":\"10038\"" json))
+      (is (re-find #"\"rule_id\":\"10027\"" json)))))
 
 (deftest rules-registry-test
   (let [filesystem (fs-host/host-filesystem

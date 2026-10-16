@@ -1,7 +1,7 @@
 # zap-proxy
 
 **kotoba-lang/zap-proxy は Kotoba/Clojure で書いた Web 脆弱性診断（DAST）
-スタックである。** 自分の管理下の Web アプリに対して spider → passive scan →
+スタックである。** 明示的な診断許諾が確認できた Web アプリに対して spider → passive scan →
 active scan（opt-in）→ report を実行する。
 
 - OWASP ZAP のソースコード・スキャンルール・ポリシー・payload/wordlist・JAR は
@@ -16,8 +16,14 @@ active scan（opt-in）→ report を実行する。
 
 ## 構成（この 1 repo に lib と app を同居させる）
 
-MITM（intercepting）プロキシはまだ実装していない。HTTP の送受信は呼び出し側が
-`:fetch-fn` / `:send-fn` として注入する。
+MITM（intercepting）プロキシはまだ実装していない。通信処理は production entrypoint が
+固定の Node/JVM transport を生成し、各 HTTP リクエスト前に許諾範囲を検証する。
+EDN request が受け付けるのは target、approval-id、active?、max-pages のデータ項目だけで、
+呼び出し元が独自 transport 関数や transport 選択肢を注入することはできない。
+
+callback を使う決定核のテストは `test/kotoba/zap_proxy/test_support.cljk` に隔離する。
+`spider` と `active` の低レベル callback API は production request surface ではなく、
+production は固定 transport を内部で組み立てる `plugin_entry` または `kbb_scan` を使う。
 
 | 層 | 何 | 出力 |
 |---|---|---|
@@ -27,28 +33,33 @@ MITM（intercepting）プロキシはまだ実装していない。HTTP の送�
 | **lib** `kotoba.zap-proxy.active` | 侵襲検査（SQLi/XSS/path traversal 等の payload 適用と反応判定） | findings |
 | **data** `resources/zap_proxy/rules/rules.edn` | ルール登録簿（EDN。ID/重要度/IPA・OWASP WSTG 参照） | 8 件 |
 | **lib** `kotoba.zap-proxy.report` | 診断レポート生成（EDN/JSON） | report 文書 |
-| **app** `kotoba.zap-proxy.cli` | 1 コマンドで全段階を実行する入口 | report 文書 |
+| **app** `kotoba.zap-proxy.plugin-entry` / `kotoba.zap-proxy.kbb-scan` | 固定 transport を使う production entrypoint | report 文書 |
 
 設計規約（AGENTS.md / ADR-2609060001）:
 
 - 判定核（何を脆弱とみなすか・payload は何か・same-origin はどう決まるか）は
-  全て pure `.cljc`。効果（実送信、実ソケット）は host 側 `:send-fn` / `:fetch-fn`
-  に注入する — `kotoba-lang/http` の `IHttp` と同じ seam。
+  全て pure `.cljc`。固定の host transport が実通信を担い、テストは test-only callback
+  harness を使う。
 - 診断項目は `orgs/cloud-itonami/app-wvme/SPEC.tsv`（IPA「ウェブ健康診断仕様」
   125 項目 + OWASP STG）と `manifest/` 側の security governance
   （`kotoba-lang/security`）を参照する。**攻撃実行・侵入・兵器運用は scope 外** —
-  これは自分の管理下の Web アプリを診断する防御側ツールである。
+  これは所有者の明示許諾を記録で確認してから実施する防御側ツールである。
 
-## 使い方
+## Runtime boundary
 
-```clojure
-(require '[kotoba.zap-proxy.cli :as cli])
+The low-level spider and active functions are trusted in-process implementation
+seams. They accept callbacks for transport composition, but untrusted tool
+input cannot reach them: the registered schemas allow only target, approval ID,
+and page cap; the adapter serializes an allowlisted EDN map; and production
+entrypoints reject callback-like and unknown fields. Tests cover adapter
+non-forwarding and EDN boundary rejection. Arbitrary code running inside the
+trusted host process is outside this external-input boundary.
 
-(cli/scan {:target "http://localhost:8080"
-           :fetch-fn my-http-fetch   ; IHttp 相当。テストは mock-http
-           :send-fn my-http-send
-           :passive? true :active? false})
-```
+Production scans run through the registered Hermes tools or the fixed JVM/KBB
+process entrypoints. Every run requires a current approval record that covers
+the target, path, mode, and page cap. Test code uses mock callbacks through the
+test-only `kotoba.zap-proxy.test-support` namespace; that namespace is not a
+production API.
 
 ## Test
 
@@ -67,9 +78,20 @@ dependencies in one reviewed checkout:
 hermes plugins install kotoba-lang/zap-proxy --ref <40-character-commit> --enable
 ```
 
-Passive and active scans are refused until the target origin is listed under
-`plugins.entries.hermes-zap-proxy.settings.zap_proxy_targets`. Active scanning
-also requires `allow_active: true`. The host must provide the `clojure` CLI.
+Every scan is refused unless `ZAP_PROXY_APPROVALS_FILE` points to an owner-only
+JSON ledger and the requested `approval_id` has a current, operator-reviewed
+record covering the exact URL path and scan mode. The old
+`zap_proxy_targets`/`allow_active` allowlist is inventory only and grants no
+authorization. Both the Python adapter and direct `kbb`/JVM transports check
+the record; each discovered path is checked before the request is sent, and
+redirects are not followed. Incoming email is never parsed into authorization.
+
+The operator-maintained ledger format and review requirements are documented in
+[`docs/authorization.md`](docs/authorization.md). The host must provide Python 3
+and either the `kbb` or `clojure` CLI. Direct KBB/JVM entry requires
+`ZAP_PROXY_REPO_ROOT` to point to the absolute trusted checkout; the Hermes
+adapter supplies it automatically. Helper paths are never resolved from the
+current working directory.
 
 ## License
 
