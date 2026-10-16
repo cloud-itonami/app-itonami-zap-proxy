@@ -1,6 +1,6 @@
 name: hermes-zap-proxy
 version: 0.2.0
-description: "DAST scanning via the kotoba-lang/zap-proxy decision core (independent implementation; does not include or call OWASP ZAP). Passive scan by default; active scan double-gated (config allow_active per target). Own-host gate enforced in code, not model judgment."
+description: "DAST scanning via the kotoba-lang/zap-proxy decision core. Every scan requires a current human-reviewed approval record binding the authorized approver, exact assets and paths, scan mode, and expiry."
 author: "kotoba-lang"
 kind: standalone
 provides_tools:
@@ -16,4 +16,4 @@ config_schema:
   zap_proxy_targets:
     type: list
     default: []
-    description: "Scan targets allowed for this agent. Each entry: {url: http://host:port, allow_active: bool}. Third-party hosts are refused by code."
+    description: "Legacy inventory only; never grants scan authorization."

@@ -3,9 +3,11 @@
   form actions, enqueue same-origin candidates, dedupe on normalized URL.
 
   The HTTP effect is injected: `fetch-fn` receives a request map and returns a
-  response map (see kotoba.zap-proxy.core). Nothing here opens a socket."
+  response map (see kotoba.zap-proxy.core). The approval record and each URL
+  are checked before the callback runs."
   (:require [kotoba.lang.text :as str]
-            [kotoba.zap-proxy.core :as core]))
+            [kotoba.zap-proxy.core :as core]
+            [kotoba.zap-proxy.authorization :as authorization]))
 
 (defn extract-links
   "All href/src/action URLs from an HTML body. Pure regex extraction — this is
@@ -49,15 +51,21 @@
 
   opts:
     :max-pages   hard cap on fetched pages (default 50)
+    :approval-id current reviewed approval record ID (required)
+    :mode        passive or active, matching the full scan (required)
     :fetch-fn    request-map -> response-map (required; the injected effect)
   Returns {:pages [...response maps] :visited #{urls} :queue-drained? bool}"
-  [{:keys [seed-url fetch-fn max-pages] :or {max-pages 50}}]
+  [{:keys [seed-url fetch-fn max-pages approval-id mode] :or {max-pages 50}}]
   ;; BFS queue as the amortized functional pair: `pending` is the front list,
   ;; `in` accumulates in order; when pending drains, pending = in reversed
   ;; and in resets. cljs has no clojure.lang.PersistentQueue (measured).
   ;; Queue semantics: pop from pending's head, conj new URLs onto in's tail
   ;; so FIFO order is preserved across the reversal.
-  (let [pop-front (fn [[pending in]]
+  (let [initial-scope (authorization/authorization-scope
+                       approval-id seed-url mode max-pages)
+        guarded-fetch (authorization/guarded-transport
+                       approval-id mode max-pages initial-scope fetch-fn)
+        pop-front (fn [[pending in]]
                     (cond
                       (seq pending) [(first pending) [(rest pending) in]]
                       (seq in)      (let [front (reverse in)]
@@ -79,7 +87,7 @@
         (let [[nxt queue] (pop-front queue)]
           (if (or (contains? visited url) (not (core/same-origin? seed-url url)))
             (recur nxt queue visited pages)
-            (let [resp (fetch-fn {:method "GET" :url url :headers {} :body nil})
+            (let [resp (guarded-fetch {:method "GET" :url url :headers {} :body nil})
                   resp (assoc resp :url url)
                   new (extract-candidates seed-url (get resp :body ""))]
               (recur nxt (enqueue queue new) (conj visited url) (conj pages resp)))))))))

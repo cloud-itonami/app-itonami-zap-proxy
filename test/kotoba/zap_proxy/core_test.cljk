@@ -9,7 +9,11 @@
     (is (= {:scheme "https" :host "h.example" :port "443"}
            (core/target-origin "https://h.example/")))
     (is (= {:scheme "https" :host "h.example" :port "8443"}
-           (core/target-origin "https://h.example:8443/a")))))
+           (core/target-origin "https://h.example:8443/a")))
+    (is (= {:scheme "https" :host "[::1]" :port "8443"}
+           (core/target-origin "https://[::1]:8443/a")))
+    (is (= {:scheme "https" :host "[2001:db8::1]" :port "443"}
+           (core/target-origin "https://[2001:db8::1]/a")))))
 
 (deftest same-origin-test
   (is (core/same-origin? "http://a.example/x" "http://a.example/y"))

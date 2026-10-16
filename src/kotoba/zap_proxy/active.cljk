@@ -5,11 +5,13 @@
   injection, path traversal, CRLF).
 
   Safety contract: this library only ever produces *request descriptions* and
-  verdicts. The actual sending is the injected `send-fn` effect (host side).
+  verdicts. The actual sending is the injected `send-fn` effect (host side),
+  behind an active-mode approval and URL scope check.
   Detection is evidence-based (marker reflection / differential response),
   never time-based guessing."
   (:require [kotoba.lang.text :as str]
-            [kotoba.zap-proxy.core :as core]))
+            [kotoba.zap-proxy.core :as core]
+            [kotoba.zap-proxy.authorization :as authorization]))
 
 ;; ---- payload tables (detection-grade, benign; no destructive payloads) ----
 
@@ -83,15 +85,20 @@
   response containing the baseline behavior only is not a finding.
 
   Returns a vector of findings (see kotoba.zap-proxy.core/finding)."
-  [{:keys [url send-fn baseline]}]
-  (let [params (parse-params url)
-        baseline-body (or (get baseline :body "") (try (:body (send-fn {:method "GET" :url url :headers {} :body nil})) "" (catch #?(:clj Exception :cljs :default) _ "")))]
+  [{:keys [url send-fn baseline approval-id max-pages]
+    :or {max-pages 1}}]
+  (let [initial-scope (authorization/authorization-scope
+                       approval-id url "active" max-pages)
+        guarded-send (authorization/guarded-transport
+                      approval-id "active" max-pages initial-scope send-fn)
+        params (parse-params url)
+        baseline-body (or (get baseline :body "") (try (:body (guarded-send {:method "GET" :url url :headers {} :body nil})) "" (catch #?(:clj Exception :cljs :default) _ "")))]
     (vec
      (for [param params
            {:keys [rule-id severity title payloads]} rule-families
            {:keys [p re]} payloads
            :let [probe-url (substitute url param p)
-                 resp (try (send-fn {:method "GET" :url probe-url :headers {} :body nil})
+                 resp (try (guarded-send {:method "GET" :url probe-url :headers {} :body nil})
                            (catch #?(:clj Exception :cljs :default) _ nil))
                  body (or (get resp :body "") "")]
            :when (and resp (re-find re body) (not= body baseline-body))]

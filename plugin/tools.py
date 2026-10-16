@@ -2,8 +2,8 @@
 
 Architecture: the decision core is pure .cljc in the zap-proxy repo (judgment,
 no I/O); this plugin is the host side. It:
-  1. enforces the own-host gate in PYTHON, before any subprocess runs —
-     the model cannot talk its way past it;
+  1. enforces a reviewed, time-bounded approval record in PYTHON, before any
+     subprocess runs — a target allowlist or email reply is not authorization;
   2. shells out to the engine that can load the .cljc core on THIS host with
      the request on stdin (EDN) and reads the report on stdout (EDN):
        - `kbb -M -m kotoba.zap-proxy.kbb-scan` (Node transport, kbb/nbb
@@ -19,7 +19,6 @@ itself.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import shutil
 import subprocess
@@ -27,8 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
-logger = logging.getLogger(__name__)
-
+from .authorization import authorize_request, load_ledger
 
 def _repo_root() -> Path:
     """Resolve the checkout containing deps.edn without a machine-local path."""
@@ -44,63 +42,6 @@ def _repo_root() -> Path:
 
 _REPO = _repo_root()
 
-# ---- own-host gate ---------------------------------------------------------
-# Sources, in order: ZAP_PROXY_TARGETS env (comma-separated "url[:active]"),
-# then plugin config settings.zap_proxy_targets (list of {url, allow_active}).
-# A target is scannable iff its ORIGIN (scheme://host:port) matches an entry.
-
-def _load_targets(ctx: Any = None) -> Dict[str, Dict[str, Any]]:
-    targets: Dict[str, Dict[str, Any]] = {}
-    # 1) ctx.get_config (plugin-relative settings read — the real ctx API).
-    if ctx is not None:
-        try:
-            raw = ctx.get_config("zap_proxy_targets")
-            if isinstance(raw, list):
-                for t in raw:
-                    if isinstance(t, dict) and t.get("url"):
-                        try:
-                            targets.setdefault(_origin(t["url"]), {"allow_active": bool(t.get("allow_active"))})
-                        except ValueError:
-                            logger.warning("Ignoring invalid zap_proxy_targets URL")
-        except Exception:
-            pass
-    # 2) direct config.yaml read (survives gateways that don't pass settings).
-    if not targets:
-        try:
-            import yaml  # hermes ships pyyaml
-            cfg_path = os.environ.get("HERMES_CONFIG")
-            if not cfg_path:
-                hermes_home = Path(os.environ.get("HERMES_HOME", "~/.hermes")).expanduser()
-                cfg_path = str(hermes_home / "config.yaml")
-            with open(cfg_path) as f:
-                cfg = yaml.safe_load(f) or {}
-            entries = ((cfg.get("plugins") or {}).get("entries") or {})
-            for key in ("hermes-zap-proxy", "zap-proxy"):
-                raw = ((entries.get(key) or {}).get("settings") or {}).get("zap_proxy_targets") or []
-                for t in raw:
-                    if isinstance(t, dict) and t.get("url"):
-                        try:
-                            targets.setdefault(_origin(t["url"]), {"allow_active": bool(t.get("allow_active"))})
-                        except ValueError:
-                            logger.warning("Ignoring invalid zap_proxy_targets URL")
-        except Exception as e:
-            logger.debug("config.yaml target read failed: %s", e)
-    # 3) env override (comma-separated url[:active]).
-    env = os.environ.get("ZAP_PROXY_TARGETS", "")
-    for entry in env.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-        active = False
-        if entry.endswith(":active"):
-            active, entry = True, entry[: -len(":active")]
-        try:
-            targets.setdefault(_origin(entry), {"allow_active": active})
-        except ValueError:
-            logger.warning("Ignoring invalid ZAP_PROXY_TARGETS URL")
-    return targets
-
-
 def _origin(url: str) -> str:
     """Return a canonical HTTP(S) origin and reject ambiguous target syntax."""
     if not isinstance(url, str) or not url.strip():
@@ -115,36 +56,22 @@ def _origin(url: str) -> str:
         port = parsed.port
     except ValueError as exc:
         raise ValueError("target port is invalid") from exc
-    port = port or (443 if parsed.scheme.lower() == "https" else 80)
+    port = port if port is not None else (443 if parsed.scheme.lower() == "https" else 80)
+    if not 1 <= port <= 65535:
+        raise ValueError("target port is invalid")
     host = parsed.hostname.lower()
     if ":" in host:
         host = f"[{host}]"
     return f"{parsed.scheme.lower()}://{host}:{port}"
 
 
-def _gate(ctx: Any, target: str, active: bool) -> Optional[str]:
-    """Return a refusal reason, or None when allowed."""
-    try:
-        target_origin = _origin(target)
-    except ValueError as exc:
-        return f"Invalid target URL: {exc}."
-    targets = _load_targets(ctx or {})
-    if not targets:
-        return (
-            "No zap_proxy_targets configured. Add targets to plugin settings "
-            "(plugins.entries.hermes-zap-proxy.settings.zap_proxy_targets) or set "
-            "ZAP_PROXY_TARGETS='http://host:port[,http://host2:active]'. "
-            "This gate exists so the agent cannot scan third-party hosts."
-        )
-    entry = targets.get(target_origin)
-    if entry is None:
-        allowed = ", ".join(sorted(targets))
-        return f"Target origin {target_origin} is not in zap_proxy_targets (allowed: {allowed}). Refusing to scan hosts outside the ledger."
-    if active and not entry.get("allow_active"):
-        return (
-            f"Target {target_origin} is registered without allow_active. "
-            "Active scan refused — record allow_active: true for this target first."
-        )
+def _gate(target: str, active: bool, approval_id: str, max_pages: int) -> Optional[str]:
+    """Fail closed unless a reviewed, unexpired record covers this URL and mode."""
+    mode = "active" if active else "passive"
+    if not approval_id:
+        return "A reviewed security assessment approval record is required."
+    if authorize_request(load_ledger(), approval_id, target, mode, max_pages=max_pages) is None:
+        return "No current approval record covers this target and scan scope. Refusing to run."
     return None
 
 
@@ -165,12 +92,15 @@ def _run_core(edn_request: str) -> Dict[str, Any]:
     else:
         return {"error": "neither kbb nor clojure on PATH"}
     try:
+        env = os.environ.copy()
+        env["ZAP_PROXY_REPO_ROOT"] = str(_REPO.resolve())
         r = subprocess.run(
             argv,
             input=edn_request,
             capture_output=True,
             text=True,
             cwd=str(_REPO),
+            env=env,
             timeout=600,
         )
     except subprocess.TimeoutExpired:
@@ -194,7 +124,8 @@ def _to_jsonable(raw: str) -> Any:
 
 def _extract(args: Any, kwargs: Dict[str, Any]) -> tuple:
     """Tool args may arrive as one positional dict (registry dispatch) or as
-    keywords (direct calls/tests). Normalize to (target, max_pages). The
+    keywords (direct calls/tests). Normalize to (target, max_pages, approval_id).
+    The
     handler forwards its own keyword defaults as None — only non-None
     keyword values take precedence over the args dict."""
     merged: Dict[str, Any] = dict(args) if isinstance(args, dict) else {}
@@ -202,40 +133,47 @@ def _extract(args: Any, kwargs: Dict[str, Any]) -> tuple:
         if v is not None:
             merged[k] = v
     target = str(merged.get("target") or "")
-    max_pages = int(merged.get("max_pages") or 50)
+    approval_id = str(merged.get("approval_id") or "")
+    raw_max_pages = merged.get("max_pages")
+    if isinstance(raw_max_pages, bool) or (
+        raw_max_pages is not None and not isinstance(raw_max_pages, (int, str))
+    ):
+        raise ValueError("max_pages must be an integer")
+    max_pages = 50 if raw_max_pages is None else int(raw_max_pages)
     if not 1 <= max_pages <= 500:
         raise ValueError("max_pages must be between 1 and 500")
-    return target, max_pages
+    return target, max_pages, approval_id
 
 
-def _edn_request(target: str, active: bool, max_pages: int) -> str:
+def _edn_request(target: str, active: bool, max_pages: int, approval_id: str) -> str:
     # JSON string syntax is a strict subset of EDN string syntax and safely
     # escapes quotes, backslashes and control characters from the URL.
     encoded_target = json.dumps(target, ensure_ascii=False)
+    encoded_approval_id = json.dumps(approval_id, ensure_ascii=False)
     return (
-        f"{{:target {encoded_target} :active? {'true' if active else 'false'} "
-        f":max-pages {max_pages} :transport :java-http}}"
+        f"{{:target {encoded_target} :approval-id {encoded_approval_id} :active? {'true' if active else 'false'} "
+        f":max-pages {max_pages}}}"
     )
 
 
-def zap_scan(args: Any = None, target: Any = None, max_pages: Any = None, **kwargs: Any) -> str:
-    target, max_pages = _extract(args, {"target": target, "max_pages": max_pages, **kwargs})
-    refusal = _gate(None, target, active=False)
+def zap_scan(args: Any = None, target: Any = None, max_pages: Any = None, approval_id: Any = None, **kwargs: Any) -> str:
+    target, max_pages, approval_id = _extract(args, {"target": target, "max_pages": max_pages, "approval_id": approval_id, **kwargs})
+    refusal = _gate(target, active=False, approval_id=approval_id, max_pages=max_pages)
     if refusal:
         return json.dumps({"refused": refusal})
-    edn = _edn_request(target, False, max_pages)
+    edn = _edn_request(target, False, max_pages, approval_id)
     result = _run_core(edn)
     if "error" in result:
         return json.dumps(result)
     return json.dumps({"target": target, "mode": "passive", **_to_jsonable(result["raw"])})
 
 
-def zap_scan_active(args: Any = None, target: Any = None, max_pages: Any = None, **kwargs: Any) -> str:
-    target, max_pages = _extract(args, {"target": target, "max_pages": max_pages, **kwargs})
-    refusal = _gate(None, target, active=True)
+def zap_scan_active(args: Any = None, target: Any = None, max_pages: Any = None, approval_id: Any = None, **kwargs: Any) -> str:
+    target, max_pages, approval_id = _extract(args, {"target": target, "max_pages": max_pages, "approval_id": approval_id, **kwargs})
+    refusal = _gate(target, active=True, approval_id=approval_id, max_pages=max_pages)
     if refusal:
         return json.dumps({"refused": refusal})
-    edn = _edn_request(target, True, max_pages)
+    edn = _edn_request(target, True, max_pages, approval_id)
     result = _run_core(edn)
     if "error" in result:
         return json.dumps(result)

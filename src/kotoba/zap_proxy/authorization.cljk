@@ -1,0 +1,139 @@
+(ns kotoba.zap-proxy.authorization
+  "Shared scope checks for hosted transports. The approval ledger itself is
+  read by plugin/authorization.py, which is also the adapter's preflight gate."
+  (:require [kotoba.lang.edn :as edn]
+            [kotoba.zap-proxy.core :as core]))
+
+(defn- verified-scope [scope mode max-pages]
+  (if (and (= true (:ok scope))
+           (= mode (:mode scope))
+           (integer? max-pages)
+           (<= 1 max-pages 500)
+           (integer? (:max-pages scope))
+           (<= max-pages (:max-pages scope) 500)
+           (seq (:assets scope)))
+    scope
+    (throw (ex-info "No current approval record covers this target and scan scope."
+                    {:refused true}))))
+
+(defn trusted-repo-file
+  "Resolve a helper only beneath the checkout root supplied by the trusted host.
+  Current working directory is deliberately never used for security helpers."
+  [relative-path]
+  #?(:cljs
+     (let [path (js/require "path")
+           root (.-ZAP_PROXY_REPO_ROOT (.-env js/process))]
+       (when-not (and (string? root) (.isAbsolute path root))
+         (throw (ex-info "Trusted scanner checkout root is not configured."
+                         {:refused true})))
+       (.resolve path root relative-path))
+     :clj
+     (let [root (System/getenv "ZAP_PROXY_REPO_ROOT")
+           root-path (when (string? root) (java.nio.file.Paths/get root (make-array String 0)))]
+       (when-not (and root-path (.isAbsolute root-path))
+         (throw (ex-info "Trusted scanner checkout root is not configured."
+                         {:refused true})))
+       (str (.resolve root-path relative-path)))))
+
+(def ^:private production-request-fields
+  #{:target :approval-id :active? :max-pages})
+
+(defn validate-production-request!
+  "Reject non-data or unknown fields before a production entry opens transport.
+  The production CLI accepts only target, approval-id, active?, and max-pages."
+  [request]
+  (when-not (and (map? request)
+                 (every? production-request-fields (keys request)))
+    (throw (ex-info "Production scan requests cannot supply transport functions or options."
+                    {:refused true})))
+  request)
+
+(defn authorization-scope
+  "Resolve a record from the owner-managed ledger. Missing, invalid, expired,
+  or out-of-scope records fail before the scanner opens a socket."
+  [approval-id target mode max-pages]
+  (let [args [(trusted-repo-file "plugin/authorization.py") "--check" (str approval-id)
+              (str target) (str mode) (str max-pages)]]
+    #?(:cljs
+       (let [cp (js/require "child_process")
+             out (try
+                   (.execFileSync cp "python3" (apply js/Array. args)
+                                  #js {:encoding "utf8"})
+                   (catch :default _
+                     (throw (ex-info "No current approval record covers this target and scan scope."
+                                     {:refused true}))))]
+         (verified-scope (edn/read-string (str out)) mode max-pages))
+       :clj
+       (let [pb (java.lang.ProcessBuilder. (into-array String (cons "python3" args)))
+             process (.start pb)
+             out (slurp (.getInputStream process))
+             error (slurp (.getErrorStream process))
+             code (.waitFor process)]
+         (if (zero? code)
+           (verified-scope (edn/read-string out) mode max-pages)
+           (throw (ex-info "No current approval record covers this target and scan scope."
+                           {:refused true :diagnostic error})))))))
+
+(defn- path-for [url]
+  #?(:cljs (let [u (js/URL. (str url))]
+             (js/decodeURIComponent (.-pathname u)))
+     :clj (let [u (java.net.URI/create (str url))]
+            (.getPath u))))
+
+(defn- safe-path? [path]
+  (and (string? path)
+       (neg? (.indexOf path "\\"))
+       (neg? (.indexOf path "\u0000"))
+       ;; The transport has decoded one layer. Remaining escapes may be
+       ;; interpreted by an upstream proxy/application, so fail closed.
+       (not (re-find #"%[0-9A-Fa-f]{2}" path))
+       (not (re-find #"(?:^|/)(?:\.|\.\.)(?:/|$)" path))))
+
+(defn- trim-trailing-slash [path]
+  (loop [value path]
+    (if (and (> (count value) 1)
+             (= "/" (subs value (dec (count value)))))
+      (recur (subs value 0 (dec (count value))))
+      value)))
+
+(defn- path-in-scope? [path root]
+  (let [root (trim-trailing-slash root)]
+    (if (= root "/")
+      (.startsWith path "/")
+      (or (= path root)
+          (.startsWith path (str root "/"))))))
+
+(defn allowed-url?
+  "True only if URL path stays under one approved asset and exact origin."
+  [scope url]
+  (try
+    (let [origin (core/target-origin (str url))
+          origin-string (str (:scheme origin) "://" (:host origin) ":" (:port origin))
+          path (path-for url)]
+      (and (safe-path? path)
+           (some (fn [asset]
+                   (and (= origin-string (:origin asset))
+                        (path-in-scope? path (:path asset))))
+                 (:assets scope))))
+    (catch #?(:cljs :default :clj Throwable) _ false)))
+
+(defn require-url!
+  "Throw before transport execution when a discovered URL leaves the approval."
+  [scope url]
+  (when-not (allowed-url? scope url)
+    (throw (ex-info "Requested URL is outside the approved asset/path scope."
+                    {:refused true})))
+  url)
+
+(defn guarded-transport
+  "Wrap one injected GET transport with current record and exact URL checks.
+  Supported production transports must also disable automatic redirects."
+  [approval-id mode max-pages initial-scope transport]
+  (fn [{:keys [method url] :as request}]
+    (when-not (= "GET" method)
+      (throw (ex-info "Requested method is outside the approved scope."
+                      {:refused true})))
+    (require-url! initial-scope url)
+    (let [current-scope (authorization-scope approval-id url mode max-pages)]
+      (require-url! current-scope url))
+    (transport request)))

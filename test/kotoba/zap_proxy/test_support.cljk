@@ -1,0 +1,42 @@
+(ns kotoba.zap-proxy.test-support
+  "Test-only callback harness. Production entrypoints build their own fixed transport.
+
+  Orchestrates
+  spider → passive scan (per crawled page) → active scan (opt-in) → report.
+
+  Injected callbacks here are test doubles only; production entrypoints build
+  their own fixed transports."
+  (:require [kotoba.zap-proxy.spider :as spider]
+            [kotoba.zap-proxy.passive :as passive]
+            [kotoba.zap-proxy.active :as active]
+            [kotoba.zap-proxy.report :as report]))
+
+(defn scan
+  "Full scan pipeline.
+
+  opts:
+    :target     seed URL (required)
+    :approval-id current reviewed approval record ID (required)
+    :fetch-fn   request -> response, used by the spider (required)
+    :send-fn    request -> response, used by active probes (defaults to fetch-fn)
+    :active?    run intrusive probes (default false — passive-only is the safe default)
+    :max-pages  spider cap (default 50; cannot exceed the approved cap)
+  Returns the report document."
+  [{:keys [target approval-id fetch-fn send-fn active? max-pages started-at]
+    :or {max-pages 50 active? false}}]
+  {:pre [(some? target) (ifn? fetch-fn)]}
+  (let [mode (if active? "active" "passive")
+        send-fn' (or send-fn fetch-fn)
+        {:keys [pages]} (spider/spider {:seed-url target :fetch-fn fetch-fn
+                                        :max-pages max-pages :approval-id approval-id
+                                        :mode mode})
+        passive-findings (vec (mapcat (fn [resp] (passive/passive-scan {:url (:url resp)} resp)) pages))
+        active-findings (if active?
+                          (vec (mapcat (fn [resp] (active/active-scan {:url (:url resp)
+                                                                      :send-fn send-fn'
+                                                                      :approval-id approval-id
+                                                                      :max-pages max-pages})))
+                                       pages)
+                          [])
+        findings (vec (concat passive-findings active-findings))]
+    (report/report-edn {:target target :findings findings :started-at started-at})))

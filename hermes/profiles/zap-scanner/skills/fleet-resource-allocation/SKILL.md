@@ -249,7 +249,7 @@ write 側 `KOTOBASE_BISCUIT_AUTH_MODE` が origin で未設定=off の挙動と�
 
 | job 種別 | 実装 repo | 割当先の条件 |
 |---|---|---|
-| DAST scan（passive / active） | `orgs/kotoba-lang/zap-proxy`（GitHub: kotoba-lang/zap-proxy、ADR-2609060001）+ **Hermes plugin `hermes-zap-proxy`**（plugin/ 配下、zap_scan / zap_scan_active / zap_scan_rules の 3 tool。own-host gate は Python 層でコード強制、active は target ごと allow_active 二重 gate）。target 登録は config.yaml plugins.entries.hermes-zap-proxy.settings.zap_proxy_targets。実測: doctor OK、agent が localhost mock を 12 findings で scan 成功、未登録 target は refused。⚠ user plugin は ~/.hermes/plugins/ でなく **~/.hermes/profiles/<p>/plugins/**（実測 2026-09-05）。⚠ tool handler は **kwargs を受けること（runtime が task_id 等を渡す）。active scan を提案するときは target の許可記録を evidence に添える。稼働 bot: profile `zap-scanner`（cron `zap-toolchain-probe` 0 7 * * * — toolchain probe のみで実 scan は agent job 別途）。⚠ cron --script は profile 内 scripts/ を探す |
+| DAST scan（passive / active） | `orgs/kotoba-lang/zap-proxy` + **Hermes plugin `hermes-zap-proxy`**。両scan toolは `ZAP_PROXY_APPROVALS_FILE` の有効記録と `approval_id` を必須とし、承認者の権限・対象URL/パス・検査方式・期限を照合。`zap_proxy_targets` / `allow_active` は inventory のみ。質問、受領通知、自動返信、配送通知から許諾を生成しない。scope外URLは送信前に拒否し、HTTP redirectを追跡しない。 |
 | 画像生成 | mflux z-image-turbo（judah 16GB 実測済み） | egress ありノードで重み取得済み。生成前 df -h と常駐 process 確認 |
 | CI gate | fleet-ci（tick.cljs LPT assign） | 最優先。生成/scan は余剰 slot |
 

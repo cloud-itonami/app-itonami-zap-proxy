@@ -1,0 +1,88 @@
+(ns kotoba.zap-proxy.authorization-test
+  (:require [kotoba.test :refer [deftest is testing]]
+            [kotoba.zap-proxy.authorization :as authorization]
+            [kotoba.zap-proxy.active :as active]
+            [kotoba.zap-proxy.spider :as spider]))
+
+(def ^:private scope
+  {:mode "active"
+   :assets [{:origin "https://example.test:443" :path "/app"}]})
+
+(deftest trusted-helper-path-is-rooted-test
+  (let [root #?(:cljs (.-ZAP_PROXY_REPO_ROOT (.-env js/process))
+                :clj (System/getenv "ZAP_PROXY_REPO_ROOT"))
+        helper (authorization/trusted-repo-file "plugin/authorization.py")]
+    (is (string? root))
+    (is (.startsWith helper (str root "/")))
+    (is (.endsWith helper "plugin/authorization.py"))))
+
+(deftest exact-asset-and-path-scope-test
+  (testing "the approved path and descendants are allowed"
+    (is (authorization/allowed-url? scope "https://example.test/app"))
+    (is (authorization/allowed-url? scope "https://example.test/app/users?id=2")))
+  (testing "sibling prefixes, other origins, and traversal are denied"
+    (is (not (authorization/allowed-url? scope "https://example.test/application")))
+    (is (not (authorization/allowed-url? scope "https://outside.test/app")))
+    (is (not (authorization/allowed-url? scope "https://example.test/app/%2e%2e/private")))
+    (is (not (authorization/allowed-url? scope "https://example.test/app/%252e%252e/private")))))
+
+(deftest explicit-ipv6-port-stays-within-approved-scope-test
+  (let [ipv6-scope {:mode "passive"
+                    :assets [{:origin "https://[::1]:8443" :path "/app"}]}]
+    (is (authorization/allowed-url? ipv6-scope "https://[::1]:8443/app/users"))
+    (is (not (authorization/allowed-url? ipv6-scope "https://[::1]:8444/app/users")))
+    (is (not (authorization/allowed-url? ipv6-scope "https://[::2]:8443/app/users")))))
+
+(deftest missing-approval-never-reaches-transport-test
+  (let [transport-called? (atom false)
+        result (try
+                 (spider/spider
+                  {:seed-url "https://example.test/application"
+                   :approval-id "test-missing-approval-9f4a8f"
+                   :fetch-fn (fn [_]
+                               (reset! transport-called? true)
+                               {:status 200 :headers {} :body ""})
+                   :mode "passive"
+                   :max-pages 1})
+                 :completed
+                 (catch #?(:cljs :default :clj Throwable) error
+                   {:refused (:refused (ex-data error))}))]
+    (is (= {:refused true} result))
+    (is (false? @transport-called?))))
+
+(deftest direct-active-scan-requires-approval-before-transport-test
+  (let [transport-called? (atom false)
+        result (try
+                 (active/active-scan
+                  {:url "https://example.test/app?id=1"
+                   :approval-id "test-missing-active-approval-9f4a8f"
+                   :send-fn (fn [_]
+                              (reset! transport-called? true)
+                              {:status 200 :headers {} :body ""})})
+                 :completed
+                 (catch #?(:cljs :default :clj Throwable) error
+                   {:refused (:refused (ex-data error))}))]
+    (is (= {:refused true} result))
+    (is (false? @transport-called?))))
+
+(deftest production-requests-reject-caller-supplied-transports-test
+  (doseq [request [{:target "https://example.test/app"
+                    :approval-id "test-approval" :fetch-fn (fn [_] {})}
+                   {:target "https://example.test/app"
+                    :approval-id "test-approval" :send-fn (fn [_] {})}
+                   {:target "https://example.test/app"
+                    :approval-id "test-approval" :transport :custom}
+                   {:target "https://example.test/app"
+                    :approval-id "test-approval" "http-client" "custom"}]]
+    (let [result (try
+                   (authorization/validate-production-request! request)
+                   :accepted
+                   (catch #?(:cljs :default :clj Throwable) error
+                     {:refused (:refused (ex-data error))}))]
+      (is (= {:refused true} result))))
+  (testing "the fixed data-only request is still accepted"
+    (is (= {:target "https://example.test/app" :approval-id "test-approval"
+            :active? false :max-pages 10}
+           (authorization/validate-production-request!
+            {:target "https://example.test/app" :approval-id "test-approval"
+             :active? false :max-pages 10})))))

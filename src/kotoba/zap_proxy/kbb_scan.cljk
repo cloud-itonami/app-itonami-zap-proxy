@@ -6,29 +6,29 @@
   back with kotoba.lang.edn — no JSON dep needed.
 
   Reads one EDN request map on stdin:
-    {:target \"http://host:port\" :active? bool :max-pages N}
+    {:target \"https://host/app\" :approval-id \"id\" :active? bool :max-pages N}
   Prints the report document (EDN) on stdout, plus a :json summary line.
 
   kbb -M -m kotoba.zap-proxy.kbb-scan < request.edn
-  (The Python plugin owns the own-host gate; this ns never opens sockets for a
-  target the gate did not clear.)"
+  The approval ledger is checked here and again by the network helper before
+  each request. Out-of-scope paths are refused before transport execution."
   (:require [kotoba.lang.edn :as edn]
             [kotoba.zap-proxy.active :as active]
             [kotoba.zap-proxy.passive :as passive]
             [kotoba.zap-proxy.report :as report]
-            [kotoba.zap-proxy.spider :as spider]))
+            [kotoba.zap-proxy.spider :as spider]
+            [kotoba.zap-proxy.authorization :as authorization]))
 
-(def ^:private default-fetch-script "plugin/zap_fetch.js")
-
-(defn node-fetch
-  "Synchronous GET over a Node subprocess (zap_fetch.js <url>). Returns
+(defn- node-fetch
+  "Synchronous GET over a Node subprocess (zap_fetch.js <url> <approval-id> <mode>). Returns
   {:status int :headers map :body string} — the exact shape the decision core
-  consumes. Errors -> status 0. The fetch-script path is closed over so a host
-  can pass an absolute path in the EDN request without any env read here."
-  [script-path]
-  (let [cp (js/require "child_process")]
+  consumes. Errors -> status 0. The helper path is fixed in this checkout and
+  cannot be supplied by the request."
+  [approval-id mode]
+  (let [cp (js/require "child_process")
+        fetch-script (authorization/trusted-repo-file "plugin/zap_fetch.js")]
     (fn [{:keys [url]}]
-      (let [args (js/Array. script-path url)
+      (let [args (js/Array. fetch-script url approval-id mode)
             out (str (.execFileSync cp "node" args {:encoding "utf8"}))]
         (if (not (empty? out))
             (let [m (edn/read-string out)]
@@ -37,33 +37,41 @@
                :body (get m :body "")})
             {:status 0 :headers {} :body "empty fetch response"})))))
 
-(defn run-scan
+(defn- run-scan
   "Compose spider -> passive -> (opt-in) active -> report, the same pipeline as
-  kotoba.zap-proxy.cli/scan but realized with `for` comprehensions. Under the
-  nbb (ClojureScript-derived) engine that kbb runs on, `cli/scan`'s
-  `(vec (mapcat ...))` cannot realize the empty result collection `active-scan`
+  the test-only callback harness but realized with `for` comprehensions. Under the
+  nbb (ClojureScript-derived) engine that kbb runs on, `(vec (mapcat ...))`
+  cannot realize the empty result collection `active-scan`
   yields for pages with no query params (a cljs for/mapcat quirk); `for`
   materializes cleanly. The decision core (spider/passive/active/report) is
   untouched and identical to the JVM path."
-  [{:keys [target fetch-fn active? max-pages]}]
-  (let [send-fn (or (:send-fn {}) fetch-fn)
-        {:keys [pages]} (spider/spider {:seed-url target :fetch-fn fetch-fn :max-pages max-pages})
+  [{:keys [target fetch-fn active? max-pages approval-id]}]
+  (let [max-pages (or max-pages 50)
+        mode (if active? "active" "passive")
+        {:keys [pages]} (spider/spider {:seed-url target :fetch-fn fetch-fn
+                                        :max-pages max-pages :approval-id approval-id
+                                        :mode mode})
         passive-findings (vec (for [resp pages]
                                 (passive/passive-scan {:url (:url resp)} resp)))
         active-findings (if active?
                           (vec (for [resp pages]
-                                 (active/active-scan {:url (:url resp) :send-fn send-fn})))
+                                 (active/active-scan {:url (:url resp) :send-fn fetch-fn
+                                                      :approval-id approval-id
+                                                      :max-pages max-pages})))
                           [])
         findings (vec (concat (flatten passive-findings) (flatten active-findings)))]
     (report/report-edn {:target target :findings findings})))
 
 (defn -main [& _]
   (let [fs (js/require "fs")
-        req (edn/read-string (str (.readFileSync fs 0 "utf8")))
-        {:keys [target active? max-pages fetch-script]} req
-        fetch-fn (node-fetch (or fetch-script default-fetch-script))
-        doc (run-scan {:target target :fetch-fn fetch-fn
-                       :active? (boolean active?) :max-pages (or max-pages 50)})]
+        req (authorization/validate-production-request!
+             (edn/read-string (str (.readFileSync fs 0 "utf8"))))
+        {:keys [target active? max-pages approval-id]} req
+        mode (if active? "active" "passive")
+        max-pages (or max-pages 50)
+        fetch-fn (node-fetch approval-id mode)
+        doc (run-scan {:target target :fetch-fn fetch-fn :approval-id approval-id
+                       :active? (boolean active?) :max-pages max-pages})]
     (println (pr-str doc))
     (println (str {:json {:target (:report/target doc)
                           :total (:report/total doc)

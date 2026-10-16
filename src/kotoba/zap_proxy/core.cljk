@@ -37,8 +37,16 @@
         [auth _path] (split-with #(not= % \/) (seq rest))
         auth (apply str auth)
         default-port (case scheme "https" "443" "80")
-        [host port] (if-let [[_ h p] (re-matches #"([^:]+):(\d+)" auth)]
-                      [h p] [auth default-port])]
+        [host port] (cond
+                      ;; IPv6 literals keep their brackets in the HTTP authority.
+                      ;; Parse them before the hostname:port form, whose host
+                      ;; group intentionally excludes colons.
+                      (re-matches #"(\[[^\]]+\]):(\d+)" auth)
+                      (let [[_ h p] (re-matches #"(\[[^\]]+\]):(\d+)" auth)]
+                        [h p])
+                      (re-matches #"([^:]+):(\d+)" auth)
+                      (let [[_ h p] (re-matches #"([^:]+):(\d+)" auth)] [h p])
+                      :else [auth default-port])]
     {:scheme scheme :host host :port port}))
 
 (defn same-origin?

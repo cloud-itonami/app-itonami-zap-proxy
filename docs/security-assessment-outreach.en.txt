@@ -1,0 +1,17 @@
+Subject: Optional security assessment for your web application
+
+Hello,
+
+Mithril offers security assessments for web applications. If you would like more
+information, please reply with your questions. A question, acknowledgment, or
+any other reply does not authorize testing.
+
+We will not schedule or run a security assessment until an authorized asset
+owner or delegated security approver gives explicit written approval that names
+the exact URLs and paths, permitted test modes, any limits, and the approved
+testing window. We will verify the approver's authority and record that scope
+before any diagnostic request is sent. Automatic replies, receipts, and delivery
+notices are not approvals.
+
+Regards,
+Mithril Security
