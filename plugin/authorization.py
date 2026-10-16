@@ -95,14 +95,17 @@ def load_ledger() -> Optional[Dict[str, Any]]:
     try:
         # Validate the opened inode, not a path stat followed by a second open.
         # A writable parent directory must not let another local user swap in a
-        # forged ledger between the permission check and the JSON read.
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        # forged ledger between the permission check and the JSON read. Platforms
+        # without POSIX owner IDs and no-follow opens cannot validate this safely.
+        if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "getuid"):
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | os.O_NOFOLLOW
         flags |= getattr(os, "O_NONBLOCK", 0)
         with os.fdopen(os.open(path, flags), encoding="utf-8") as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode):
                 return None
-            if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            if info.st_uid != os.getuid():
                 return None
             if stat.S_IMODE(info.st_mode) & 0o077:
                 return None
