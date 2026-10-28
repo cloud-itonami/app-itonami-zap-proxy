@@ -49,6 +49,7 @@
                       :unknown)
      :report/collection-state collection-state
      :report/coverage coverage
+     :report/urls (vec (map :url (:pages crawl)))
      :report/limitations (cond-> ["HTML attribute discovery only; JavaScript routes are not covered."
                                   "GET-only transport; forms and authenticated workflows are not covered."
                                   "A complete collection does not establish complete application coverage or security."]
@@ -60,8 +61,10 @@
 
 (defn report-json
   "JSON string rendering of the same report."
-  [{:keys [target findings] :as doc}]
-  (let [r (report-edn doc)
+  [doc]
+  (let [r (if (:report/version doc) doc (report-edn doc))
+        target (:report/target r)
+        findings (:report/findings r)
         coverage (:report/coverage r)]
     (str "{"
          "\"version\":" (:report/version r) ","
@@ -79,6 +82,7 @@
                                  ",\"queue_drained\":" (if (:queue-drained? coverage) "true" "false")
                                  ",\"max_pages\":" (:max-pages coverage) "}")
                             "null") ","
+         "\"urls\":[" (str/join "," (map json-str (:report/urls r))) "],"
          "\"total\":" (:report/total r) ","
          "\"counts\":{"
          (str/join "," (for [[s n] (:report/counts r)]

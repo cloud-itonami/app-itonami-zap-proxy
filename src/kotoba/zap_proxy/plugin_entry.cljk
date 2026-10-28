@@ -76,4 +76,6 @@
         findings (vec (concat passive-findings active-findings))
         doc (report/report-edn {:target target :findings findings :crawl crawl
                                 :mode mode :max-pages (or max-pages 50)})]
-    (println (pr-str doc))))
+    (if (= "json" (System/getenv "ZAP_PROXY_OUTPUT_FORMAT"))
+      (println (report/report-json doc))
+      (println (pr-str doc)))))

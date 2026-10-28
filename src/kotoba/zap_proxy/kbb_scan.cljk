@@ -74,8 +74,11 @@
         fetch-fn (node-fetch approval-id mode)
         doc (run-scan {:target target :fetch-fn fetch-fn :approval-id approval-id
                        :active? (boolean active?) :max-pages max-pages})]
-    (println (pr-str doc))
-    (println (str {:json {:target (:report/target doc)
+    (if (= "json" (.-ZAP_PROXY_OUTPUT_FORMAT (.-env (js/require "process"))))
+      (println (report/report-json doc))
+      (do
+        (println (pr-str doc))
+        (println (str {:json {:target (:report/target doc)
                           :collection-state (:report/collection-state doc)
                           :coverage (:report/coverage doc)
                           :total (:report/total doc)
@@ -85,4 +88,4 @@
                                                      :severity (name (:severity f))
                                                      :param (:param f)
                                                      :url (:url f)}))
-                                             (take 20 (:report/findings doc)))}}))))
+                                             (take 20 (:report/findings doc)))}}))))))

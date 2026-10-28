@@ -74,7 +74,17 @@ production API.
 ```sh
 ZAP_PROXY_REPO_ROOT="$PWD" kbb -M:test
 python3 -m unittest plugin.test_tools
+python3 -m unittest plugin.test_zap_api
 ```
+
+## ZAP-compatible API surface
+
+The first-party scanner includes a loopback JSON API facade for a declared
+subset of ZAP client endpoints. See [the endpoint matrix and authorization
+contract](docs/zap-api-compatibility.md). Its JSON paths and supported response
+shapes are compatibility interfaces; the service does not run OWASP ZAP or
+claim complete API, rule, or application-coverage parity. Unknown operations
+fail explicitly. A reviewed owner grant is still required for every scan.
 
 ## Hermes plugin
 

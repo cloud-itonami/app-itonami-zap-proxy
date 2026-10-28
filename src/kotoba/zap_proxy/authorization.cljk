@@ -57,7 +57,7 @@
     #?(:cljs
        (let [cp (js/require "child_process")
              out (try
-                   (.execFileSync cp "python3" (apply js/Array. args)
+                   (.execFileSync cp "python3" (clj->js args)
                                   #js {:encoding "utf8"})
                    (catch :default _
                      (throw (ex-info "No current approval record covers this target and scan scope."
