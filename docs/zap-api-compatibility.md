@@ -29,6 +29,8 @@ Pass the key in `X-ZAP-API-Key` or the ZAP `apikey` query/form parameter. Query 
 | `core/view/urls` | `urls` array | Optional `baseurl` filter |
 | `core/view/alerts` | `alerts` array | Optional `baseurl`, `start`, `count`; first-party rule IDs, ZAP-shaped fields |
 | `core/view/numberOfAlerts` | integer `numberOfAlerts` | Optional `baseurl` and `riskId` |
+| `alert/view/alerts`, `alert/view/numberOfAlerts` | Same alert shapes | Current ZAP alert component aliases; optional `riskId` |
+| `pscan/view/recordsToScan` | `recordsToScan` string `0` | Only after the bounded passive run has finished |
 | `mithril/view/scanEvidence` | `scanEvidence` | Mithril extension exposing exact report, coverage, limitations and terminal state |
 
 Unsupported components, formats and scan options return a JSON `UNSUPPORTED_OPERATION`, `UNSUPPORTED_FORMAT` or `UNSUPPORTED_PARAMETER` error without starting a scan. Unknown, stopped or partial runs never return an empty clean finding set: standard alert views return `SCAN_IN_PROGRESS` or `INCOMPLETE_SCAN`; the Mithril evidence view remains available. The service currently keeps at most 16 in-memory runs, and does not provide persistent history, authentication contexts, Ajax/Client Spider, HTTP interception, WebSocket, OpenAPI import, ZAP rule IDs or report formats. These remain in [MITHRIL-1858](https://linear.app/kotobalabs/issue/MITHRIL-1858/deliver-mithril-web-scanner-to-qualified-zap-class-capability-coverage) and its child issues.

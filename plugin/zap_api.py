@@ -27,6 +27,9 @@ COMPATIBLE_ENDPOINTS = frozenset({
     ("core", "view", "urls"),
     ("core", "view", "alerts"),
     ("core", "view", "numberOfAlerts"),
+    ("alert", "view", "alerts"),
+    ("alert", "view", "numberOfAlerts"),
+    ("pscan", "view", "recordsToScan"),
     ("spider", "action", "scan"),
     ("spider", "action", "stop"),
     ("spider", "view", "status"),
@@ -276,6 +279,13 @@ class Handler(BaseHTTPRequestHandler):
         component, operation, name = route
         if route == ("core", "view", "version"):
             return {"version": "0.1.0"}
+        if route == ("pscan", "view", "recordsToScan"):
+            scan = self.manager.latest()
+            if scan is not None and scan.state == "running":
+                raise APIError("SCAN_IN_PROGRESS", "Passive analysis is still running", 409)
+            if scan is not None and scan.state != "complete":
+                raise APIError("INCOMPLETE_SCAN", "Latest scan is incomplete; inspect Mithril scanEvidence", 409)
+            return {"recordsToScan": "0"}
         if operation == "action" and name == "scan":
             accepted = {"apikey", "url", "recurse", "contextName", "contextId", "subtreeOnly",
                         "scanPolicyName", "method", "postData", "inScopeOnly", "maxChildren"}
@@ -320,16 +330,16 @@ class Handler(BaseHTTPRequestHandler):
         if name == "urls":
             return {"urls": [u for u in report.get("urls", []) if not base or u.startswith(base)]}
         alerts = [a for a in _alerts(report) if not base or a["url"].startswith(base)]
+        risk_id = _one(p, "riskId")
+        if risk_id:
+            if risk_id not in ("0", "1", "2", "3"):
+                raise APIError("BAD_REQUEST", "Invalid riskId")
+            alerts = [a for a in alerts if a["riskcode"] == risk_id]
         if name == "alerts":
             start = _page(p, "start", 0, 100000)
             count = _page(p, "count", len(alerts), 10000)
             return {"alerts": alerts[start:start + count]}
         if name == "numberOfAlerts":
-            risk_id = _one(p, "riskId")
-            if risk_id:
-                if risk_id not in ("0", "1", "2", "3"):
-                    raise APIError("BAD_REQUEST", "Invalid riskId")
-                alerts = [a for a in alerts if a["riskcode"] == risk_id]
             return {"numberOfAlerts": len(alerts)}
         raise APIError("UNSUPPORTED_OPERATION", "Endpoint is not implemented by Mithril", 501)
 

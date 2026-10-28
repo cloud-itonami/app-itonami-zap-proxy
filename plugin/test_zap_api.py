@@ -111,8 +111,11 @@ class APITest(unittest.TestCase):
         self.assertEqual(self.call("/JSON/core/view/urls/")[1], {"urls": [self.target]})
         self.assertEqual(self.call("/JSON/core/view/numberOfAlerts/")[1], {"numberOfAlerts": 1})
         self.assertEqual(self.call("/JSON/core/view/numberOfAlerts/", {"riskId": 3})[1], {"numberOfAlerts": 0})
+        self.assertEqual(self.call("/JSON/alert/view/numberOfAlerts/", {"riskId": 1})[1], {"numberOfAlerts": 1})
+        self.assertEqual(self.call("/JSON/pscan/view/recordsToScan/")[1], {"recordsToScan": "0"})
         alerts = self.call("/JSON/core/view/alerts/", {"start": 0, "count": 10})[1]["alerts"]
         self.assertEqual((alerts[0]["pluginId"], alerts[0]["risk"]), ("10001", "Low"))
+        self.assertEqual(self.call("/JSON/alert/view/alerts/", {"riskId": 1})[1]["alerts"], alerts)
 
     def test_active_partial_scan_fails_closed_and_evidence_remains_available(self):
         scan_id = self.call("/JSON/ascan/action/scan/", {"url": self.target})[1]["scan"]
