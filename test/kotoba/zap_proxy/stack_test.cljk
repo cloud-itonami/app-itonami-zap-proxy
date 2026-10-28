@@ -59,6 +59,19 @@
       ;; out-of-origin link never fetched
       (is (not (some #(re-find #"other.example" %) visited))))))
 
+(deftest nested-relative-link-resolution-test
+  (let [candidates (spider/extract-candidates
+                    "http://t.local/app/page"
+                    (str "<a href=\"next\">next</a>"
+                         "<a href=\"?page=2\">query</a>"
+                         "<a href=\"../outside\">outside path</a>"
+                         "<a href=\"//other.example/x\">other origin</a>"
+                         "<a href=\"javascript:alert(1)\">script</a>"))]
+    (is (= ["http://t.local/app/next"
+            "http://t.local/app/page?page=2"
+            "http://t.local/outside"]
+           candidates))))
+
 (deftest bounded-collection-state-test
   (with-redefs [authorization/authorization-scope
                 (fn [_ _ mode _] (assoc mock-approval-scope :mode mode))]
