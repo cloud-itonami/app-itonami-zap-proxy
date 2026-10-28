@@ -120,6 +120,16 @@
     (is (= "complete" (.-collection_state json)))
     (is (= 0 (.-transport_failures (.-coverage json))))))
 
+(deftest active-probes-cannot-inherit-crawl-completion-test
+  (let [crawl {:pages [{:status 200 :headers {} :body ""}]
+               :visited #{"http://t.local/"} :failures []
+               :queued-unattempted 0 :queue-drained? true}
+        doc (report/report-edn {:target "http://t.local/" :findings []
+                                :mode "active" :max-pages 1 :crawl crawl})]
+    (is (= :partial (:report/collection-state doc)))
+    (is (some #(re-find #"completeness is not measured" %)
+              (:report/limitations doc)))))
+
 (deftest spider-never-fetches-out-of-scope-path-test
   (let [fetches (atom [])
         scoped {:ok true :mode "passive" :max-pages 10

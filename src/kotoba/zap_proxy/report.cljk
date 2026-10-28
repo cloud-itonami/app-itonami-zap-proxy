@@ -28,6 +28,7 @@
   (let [by-sev (group-by :severity findings)
         collection-state (cond
                            (nil? crawl) :unknown
+                           (= mode "active") :partial
                            (and (:queue-drained? crawl) (empty? (:failures crawl))) :complete
                            :else :partial)
         coverage (when crawl
@@ -52,7 +53,7 @@
                                   "GET-only transport; forms and authenticated workflows are not covered."
                                   "A complete collection does not establish complete application coverage or security."]
                             (= mode "active")
-                            (conj "Active checks cover only the implemented GET query probes."))
+                            (conj "Active checks cover only the implemented GET query probes; active probe transport completeness is not measured."))
      :report/counts (into {} (for [[s fs] by-sev] [s (count fs)]))
      :report/total (count findings)
      :report/findings (vec findings)}))
