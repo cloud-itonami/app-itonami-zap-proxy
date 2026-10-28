@@ -47,6 +47,14 @@ production は固定 transport を内部で組み立てる `plugin_entry` また
 
 ## Runtime boundary
 
+Mithril Web Scanner is the first-party product surface for this Kotoba Labs
+decision core. The current implementation is a bounded HTML GET crawler with a
+small passive rule catalog and separately authorized active probes. It is not
+feature equivalent to OWASP ZAP and does not issue a scan certificate. Reports
+distinguish a drained, successful bounded collection from a page cap or
+transport failure. A complete collection with zero findings does not establish
+full application coverage or security.
+
 The low-level spider and active functions are trusted in-process implementation
 seams. They accept callbacks for transport composition, but untrusted tool
 input cannot reach them: the registered schemas allow only target, approval ID,
@@ -64,7 +72,7 @@ production API.
 ## Test
 
 ```sh
-kbb -M:test
+ZAP_PROXY_REPO_ROOT="$PWD" kbb -M:test
 python3 -m unittest plugin.test_tools
 ```
 

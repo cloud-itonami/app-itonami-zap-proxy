@@ -54,40 +54,44 @@
     :approval-id current reviewed approval record ID (required)
     :mode        passive or active, matching the full scan (required)
     :fetch-fn    request-map -> response-map (required; the injected effect)
-  Returns {:pages [...response maps] :visited #{urls} :queue-drained? bool}"
+  Returns successful pages, attempted URLs, transport failures and whether
+  every discovered URL was attempted. A failed request is not a scanned page."
   [{:keys [seed-url fetch-fn max-pages approval-id mode] :or {max-pages 50}}]
-  ;; BFS queue as the amortized functional pair: `pending` is the front list,
-  ;; `in` accumulates in order; when pending drains, pending = in reversed
-  ;; and in resets. cljs has no clojure.lang.PersistentQueue (measured).
-  ;; Queue semantics: pop from pending's head, conj new URLs onto in's tail
-  ;; so FIFO order is preserved across the reversal.
+  (when-not (and (integer? max-pages) (<= 1 max-pages 500) (ifn? fetch-fn))
+    (throw (ex-info "Invalid crawl budget or transport" {})))
   (let [initial-scope (authorization/authorization-scope
                        approval-id seed-url mode max-pages)
         guarded-fetch (authorization/guarded-transport
-                       approval-id mode max-pages initial-scope fetch-fn)
-        pop-front (fn [[pending in]]
-                    (cond
-                      (seq pending) [(first pending) [(rest pending) in]]
-                      (seq in)      (let [front (reverse in)]
-                                      [(first front) [(rest front) []]])
-                      :else         [nil [[] []]]))
-        enqueue  (fn [[pending in] xs] [pending (vec (concat in xs))])]
-    (loop [url    seed-url
-           queue  [[seed-url] []]
+                       approval-id mode max-pages initial-scope fetch-fn)]
+    ;; The page cap applies to attempts, including failed requests.
+    (loop [queue [seed-url]
+           queued #{seed-url}
+           cursor 0
            visited #{}
-           pages  []]
+           pages []
+           failures []]
       (cond
-        (nil? url)
-        {:pages pages :visited visited :queue-drained? true}
+        (= cursor (count queue))
+        {:pages pages :visited visited :failures failures
+         :queued-unattempted 0 :queue-drained? true}
 
-        (>= (count pages) max-pages)
-        {:pages pages :visited visited :queue-drained? false}
+        (>= (count visited) max-pages)
+        {:pages pages :visited visited :failures failures
+         :queued-unattempted (- (count queue) cursor) :queue-drained? false}
 
         :else
-        (let [[nxt queue] (pop-front queue)]
-          (if (or (contains? visited url) (not (core/same-origin? seed-url url)))
-            (recur nxt queue visited pages)
-            (let [resp (guarded-fetch {:method "GET" :url url :headers {} :body nil})
-                  resp (assoc resp :url url)
-                  new (extract-candidates seed-url (get resp :body ""))]
-              (recur nxt (enqueue queue new) (conj visited url) (conj pages resp)))))))))
+        (let [url (nth queue cursor)
+              response (guarded-fetch {:method "GET" :url url :headers {} :body nil})
+              valid? (and (map? response)
+                          (integer? (:status response))
+                          (<= 100 (:status response) 599)
+                          (map? (:headers response))
+                          (string? (:body response)))
+              candidates (if valid? (extract-candidates url (:body response)) [])
+              new (vec (remove queued candidates))]
+          (recur (into queue new)
+                 (into queued new)
+                 (inc cursor)
+                 (conj visited url)
+                 (if valid? (conj pages (assoc response :url url)) pages)
+                 (if valid? failures (conj failures {:url url :reason :transport-failure}))))))))

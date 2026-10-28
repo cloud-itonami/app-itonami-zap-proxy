@@ -22,12 +22,37 @@
        "}"))
 
 (defn report-edn
-  "Canonical report document (EDN map). One map per scan."
-  [{:keys [target findings started-at]}]
-  (let [by-sev (group-by :severity findings)]
-    {:report/version 1
+  "Canonical report document. Complete means this bounded collection finished,
+  never that the application was fully tested or found secure."
+  [{:keys [target findings started-at crawl mode max-pages]}]
+  (let [by-sev (group-by :severity findings)
+        collection-state (cond
+                           (nil? crawl) :unknown
+                           (and (:queue-drained? crawl) (empty? (:failures crawl))) :complete
+                           :else :partial)
+        coverage (when crawl
+                   {:attempted-pages (count (:visited crawl))
+                    :fetched-pages (count (:pages crawl))
+                    :transport-failures (count (:failures crawl))
+                    :queued-unattempted (or (:queued-unattempted crawl) 0)
+                    :queue-drained? (true? (:queue-drained? crawl))
+                    :max-pages max-pages})]
+    {:report/version 2
+     :report/product "Mithril Web Scanner"
+     :report/engine "kotoba-lang/zap-proxy"
      :report/target target
      :report/started-at started-at
+     :report/method (case mode
+                      "active" :limited-active-get-v1
+                      "passive" :passive-html-get-v1
+                      :unknown)
+     :report/collection-state collection-state
+     :report/coverage coverage
+     :report/limitations (cond-> ["HTML attribute discovery only; JavaScript routes are not covered."
+                                  "GET-only transport; forms and authenticated workflows are not covered."
+                                  "A complete collection does not establish complete application coverage or security."]
+                            (= mode "active")
+                            (conj "Active checks cover only the implemented GET query probes."))
      :report/counts (into {} (for [[s fs] by-sev] [s (count fs)]))
      :report/total (count findings)
      :report/findings (vec findings)}))
@@ -35,9 +60,24 @@
 (defn report-json
   "JSON string rendering of the same report."
   [{:keys [target findings] :as doc}]
-  (let [r (report-edn doc)]
+  (let [r (report-edn doc)
+        coverage (:report/coverage r)]
     (str "{"
+         "\"version\":" (:report/version r) ","
+         "\"product\":" (json-str (:report/product r)) ","
+         "\"engine\":" (json-str (:report/engine r)) ","
          "\"target\":" (json-str target) ","
+         "\"method\":" (json-str (name (:report/method r))) ","
+         "\"collection_state\":" (json-str (name (:report/collection-state r))) ","
+         "\"limitations\":[" (str/join "," (map json-str (:report/limitations r))) "],"
+         "\"coverage\":" (if coverage
+                            (str "{\"attempted_pages\":" (:attempted-pages coverage)
+                                 ",\"fetched_pages\":" (:fetched-pages coverage)
+                                 ",\"transport_failures\":" (:transport-failures coverage)
+                                 ",\"queued_unattempted\":" (:queued-unattempted coverage)
+                                 ",\"queue_drained\":" (if (:queue-drained? coverage) "true" "false")
+                                 ",\"max_pages\":" (:max-pages coverage) "}")
+                            "null") ","
          "\"total\":" (:report/total r) ","
          "\"counts\":{"
          (str/join "," (for [[s n] (:report/counts r)]

@@ -48,9 +48,10 @@
   [{:keys [target fetch-fn active? max-pages approval-id]}]
   (let [max-pages (or max-pages 50)
         mode (if active? "active" "passive")
-        {:keys [pages]} (spider/spider {:seed-url target :fetch-fn fetch-fn
-                                        :max-pages max-pages :approval-id approval-id
-                                        :mode mode})
+        crawl (spider/spider {:seed-url target :fetch-fn fetch-fn
+                              :max-pages max-pages :approval-id approval-id
+                              :mode mode})
+        pages (:pages crawl)
         passive-findings (vec (for [resp pages]
                                 (passive/passive-scan {:url (:url resp)} resp)))
         active-findings (if active?
@@ -60,7 +61,8 @@
                                                       :max-pages max-pages})))
                           [])
         findings (vec (concat (flatten passive-findings) (flatten active-findings)))]
-    (report/report-edn {:target target :findings findings})))
+    (report/report-edn {:target target :findings findings :crawl crawl
+                        :mode mode :max-pages max-pages})))
 
 (defn -main [& _]
   (let [fs (js/require "fs")
@@ -74,6 +76,8 @@
                        :active? (boolean active?) :max-pages max-pages})]
     (println (pr-str doc))
     (println (str {:json {:target (:report/target doc)
+                          :collection-state (:report/collection-state doc)
+                          :coverage (:report/coverage doc)
                           :total (:report/total doc)
                           :counts (:report/counts doc)
                           :findings (into [] (map (fn [f]
