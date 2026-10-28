@@ -241,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self) -> None:
         try:
             host = self.headers.get("Host", "")
-            if host not in (f"127.0.0.1:{self.server.server_port}",
+            if len(self.headers.get_all("Host", [])) != 1 or host not in (f"127.0.0.1:{self.server.server_port}",
                             f"localhost:{self.server.server_port}"):
                 raise APIError("BAD_HOST", "Loopback Host required", 403)
             if self.headers.get("Origin") or self.headers.get("Sec-Fetch-Site") == "cross-site":

@@ -147,6 +147,21 @@ class APITest(unittest.TestCase):
         release.set()
         self.wait(scan_id)
 
+    def test_stop_marks_run_incomplete_and_keeps_evidence_state(self):
+        entered = threading.Event()
+        release = threading.Event()
+        def slow_runner(scan, _approval, _max_pages):
+            entered.set()
+            release.wait(timeout=2)
+            return {"target": scan.target, "collection_state": "complete", "urls": [], "findings": []}
+        self.manager.runner = slow_runner
+        scan_id = self.call("/JSON/spider/action/scan/", {"url": self.target})[1]["scan"]
+        self.assertTrue(entered.wait(timeout=1))
+        self.assertEqual(self.call("/JSON/spider/action/stop/", {"scanId": scan_id}), (200, {"Result": "OK"}))
+        release.set()
+        self.assertEqual(self.call("/JSON/spider/view/status/", {"scanId": scan_id})[1]["code"], "INCOMPLETE_SCAN")
+        self.assertEqual(self.call("/JSON/mithril/view/scanEvidence/", {"scanId": scan_id})[1]["scanEvidence"]["state"], "stopped")
+
 
 class EngineIntegrationTest(unittest.TestCase):
     def test_actual_engine_json_report_on_authorized_loopback_target(self):
