@@ -40,10 +40,14 @@
         (.method builder (or method "POST")
                  (HttpRequest$BodyPublishers/ofString (str body))))
       (let [resp (.send client (.build builder)
-                        (HttpResponse$BodyHandlers/ofString))]
-        {:status (.statusCode resp)
-         :headers (into {} (.map (.headers resp)))
-         :body (.body resp)}))))
+                        (HttpResponse$BodyHandlers/ofInputStream))
+            bytes (with-open [stream (.body resp)]
+                    (.readNBytes stream 1048577))]
+        (if (> (alength bytes) 1048576)
+          {:status 0 :headers {} :body "response exceeded byte limit"}
+          {:status (.statusCode resp)
+           :headers (into {} (.map (.headers resp)))
+           :body (String. bytes java.nio.charset.StandardCharsets/UTF_8)})))))
 
 (defn -main [& _]
   (let [req (authorization/validate-production-request!
@@ -52,11 +56,12 @@
         mode (if active? "active" "passive")
         scope (authorization/authorization-scope approval-id target mode (or max-pages 50))
         fetch-fn (java-fetch-fn approval-id mode (or max-pages 50) scope)
-        {:keys [pages]} (spider/spider {:seed-url target
-                                        :fetch-fn fetch-fn
-                                        :max-pages (or max-pages 50)
-                                        :approval-id approval-id
-                                        :mode mode})
+        crawl (spider/spider {:seed-url target
+                              :fetch-fn fetch-fn
+                              :max-pages (or max-pages 50)
+                              :approval-id approval-id
+                              :mode mode})
+        pages (:pages crawl)
         passive-findings (vec (mapcat (fn [resp]
                                         (passive/passive-scan {:url (:url resp)} resp))
                                       pages))
@@ -69,5 +74,8 @@
                                        pages))
                           [])
         findings (vec (concat passive-findings active-findings))
-        doc (report/report-edn {:target target :findings findings})]
-    (println (pr-str doc))))
+        doc (report/report-edn {:target target :findings findings :crawl crawl
+                                :mode mode :max-pages (or max-pages 50)})]
+    (if (= "json" (System/getenv "ZAP_PROXY_OUTPUT_FORMAT"))
+      (println (report/report-json doc))
+      (println (pr-str doc)))))
