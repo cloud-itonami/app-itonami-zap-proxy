@@ -32,6 +32,7 @@ const esc = (s) =>
   '"';
 const val = (v) => (Array.isArray(v) ? "[" + v.map(esc).join(" ") + "]" : esc(v));
 const h = /^https/.test(u) ? require("https") : require("http");
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 let done = false;
 const fin = (r) => {
   if (done) return;
@@ -47,10 +48,23 @@ const fin = (r) => {
 };
 const req = h.request(u, { timeout: 15000 }, (res) => {
   let d = [];
-  res.on("data", (c) => d.push(c));
+  let received = 0;
+  res.on("data", (c) => {
+    received += c.length;
+    if (received > MAX_RESPONSE_BYTES) {
+      if (done) return;
+      done = true;
+      res.destroy();
+      req.destroy();
+      process.stdout.write('{:status 0 :headers {} :body "response exceeded byte limit"}');
+      return;
+    }
+    d.push(c);
+  });
   res.on("end", () => fin({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(d).toString("utf8") }));
 });
 req.on("error", (e) => {
+  if (done) return;
   done = true;
   process.stdout.write("{:status 0 :headers {} :body " + esc(String(e)) + "}");
 });

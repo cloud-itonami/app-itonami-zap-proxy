@@ -229,6 +229,68 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertIn("refused", result.stdout)
 
+    def test_direct_node_transport_caps_synthetic_response(self):
+        import http.server
+        import shutil
+        import subprocess
+        import threading
+        import time
+        from pathlib import Path
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable")
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                try:
+                    self.wfile.write(b"x" * (1024 * 1024 + 4096))
+                except BrokenPipeError:
+                    pass
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            url = f"http://127.0.0.1:{server.server_address[1]}/"
+            now = int(time.time())
+            ledger = approval_ledger()
+            record = ledger["approvals"][0]
+            record.update(
+                approved_at=now - 3600,
+                reviewed_at=now - 1800,
+                not_before=now - 600,
+                expires_at=now + 3600,
+                assets=[url],
+                modes=["passive"],
+                max_pages=1,
+            )
+            with tempfile.TemporaryDirectory() as directory:
+                path = os.path.join(directory, "approvals.json")
+                with open(path, "w", encoding="utf-8") as stream:
+                    json.dump(ledger, stream)
+                os.chmod(path, 0o600)
+                script = Path(__file__).with_name("zap_fetch.js")
+                result = subprocess.run(
+                    [node, str(script), url, "approval-123", "passive"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    env={**os.environ, "ZAP_PROXY_APPROVALS_FILE": path},
+                )
+            self.assertEqual(result.returncode, 0)
+            self.assertIn(":status 0", result.stdout)
+            self.assertIn("response exceeded byte limit", result.stdout)
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join()
+
 
 if __name__ == "__main__":
     unittest.main()

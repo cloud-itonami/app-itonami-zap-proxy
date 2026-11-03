@@ -59,6 +59,77 @@
       ;; out-of-origin link never fetched
       (is (not (some #(re-find #"other.example" %) visited))))))
 
+(deftest nested-relative-link-resolution-test
+  (let [candidates (spider/extract-candidates
+                    "http://t.local/app/page"
+                    (str "<a href=\"next\">next</a>"
+                         "<a href=\"?page=2\">query</a>"
+                         "<a href=\"../outside\">outside path</a>"
+                         "<a href=\"//other.example/x\">other origin</a>"
+                         "<a href=\"javascript:alert(1)\">script</a>"))]
+    (is (= ["http://t.local/app/next"
+            "http://t.local/app/page?page=2"
+            "http://t.local/outside"]
+           candidates))))
+
+(deftest bounded-collection-state-test
+  (with-redefs [authorization/authorization-scope
+                (fn [_ _ mode _] (assoc mock-approval-scope :mode mode))]
+    (let [complete (test-support/scan {:target "http://t.local/"
+                                       :approval-id "test-approval"
+                                       :fetch-fn fetch-fn :max-pages 3})
+          capped (test-support/scan {:target "http://t.local/"
+                                     :approval-id "test-approval"
+                                     :fetch-fn fetch-fn :max-pages 2})
+          failed (test-support/scan {:target "http://t.local/"
+                                     :approval-id "test-approval"
+                                     :fetch-fn (fn [{:keys [url] :as request}]
+                                                 (if (= url "http://t.local/a")
+                                                   {:status 0 :headers {} :body "timeout"}
+                                                   (fetch-fn request)))
+                                     :max-pages 3})]
+      (is (= :complete (:report/collection-state complete)))
+      (is (= {:attempted-pages 3 :fetched-pages 3 :transport-failures 0
+              :queued-unattempted 0
+              :queue-drained? true :max-pages 3}
+             (:report/coverage complete)))
+      (is (= :partial (:report/collection-state capped)))
+      (is (= false (get-in capped [:report/coverage :queue-drained?])))
+      (is (= 2 (get-in capped [:report/coverage :attempted-pages])))
+      (is (= 1 (get-in capped [:report/coverage :queued-unattempted])))
+      (is (= :partial (:report/collection-state failed)))
+      (is (= 1 (get-in failed [:report/coverage :transport-failures])))
+      (is (= 2 (get-in failed [:report/coverage :fetched-pages])))
+      (is (not (some #(= "http://t.local/a" (:url %)) (:report/findings failed)))))))
+
+(deftest no-findings-is-not-security-certification-test
+  (let [doc (report/report-edn
+             {:target "http://t.local/" :findings [] :mode "passive" :max-pages 1
+              :crawl {:pages [{:status 200 :headers {} :body ""}]
+                      :visited #{"http://t.local/"} :failures []
+                      :queue-drained? true}})
+        json (.parse js/JSON (report/report-json
+                              {:target "http://t.local/" :findings []
+                               :mode "passive" :max-pages 1
+                               :crawl {:pages [{:status 200 :headers {} :body ""}]
+                                       :visited #{"http://t.local/"} :failures []
+                                       :queue-drained? true}}))]
+    (is (= 0 (:report/total doc)))
+    (is (= :complete (:report/collection-state doc)))
+    (is (some #(re-find #"does not establish" %) (:report/limitations doc)))
+    (is (= "complete" (.-collection_state json)))
+    (is (= 0 (.-transport_failures (.-coverage json))))))
+
+(deftest active-probes-cannot-inherit-crawl-completion-test
+  (let [crawl {:pages [{:status 200 :headers {} :body ""}]
+               :visited #{"http://t.local/"} :failures []
+               :queued-unattempted 0 :queue-drained? true}
+        doc (report/report-edn {:target "http://t.local/" :findings []
+                                :mode "active" :max-pages 1 :crawl crawl})]
+    (is (= :partial (:report/collection-state doc)))
+    (is (some #(re-find #"completeness is not measured" %)
+              (:report/limitations doc)))))
+
 (deftest spider-never-fetches-out-of-scope-path-test
   (let [fetches (atom [])
         scoped {:ok true :mode "passive" :max-pages 10
